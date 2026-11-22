@@ -16,6 +16,7 @@ viim foto.png            # n/b listuje ostatní obrázky ve stejném adresáři
 viim ~/Obrazky           # všechny obrázky v adresáři
 viim a.png b.svg         # jen vybrané soubory
 viim -t 3 Rotace.png     # zavře se po 3 s
+viim -s 5 ~/Obrazky      # slideshow, obrázek každých 5 s
 ```
 
 ## Volby
@@ -23,6 +24,7 @@ viim -t 3 Rotace.png     # zavře se po 3 s
 |---|---|---|
 | `cesta …` | – (otevře dialog) | soubor(y) nebo adresář; jeden soubor → listuje se celým jeho adresářem |
 | `-t`, `--timeout SEK` | `0` (nezavírat) | zavřít po N s; jakákoli akce (klávesa, scroll, tažení) zavření zruší |
+| `-s`, `--slideshow SEK` | vypnuto (interval 3 s) | spustit slideshow s intervalem SEK; klávesa `s` pak používá tento interval |
 | `-H`, `--max-height PX` | 90 % nejnižšího monitoru | max. výška okna (logické px) |
 | `-W`, `--max-width PX` | 90 % nejužšího monitoru | max. šířka okna (logické px) |
 | `--app-id ID` | `viim` | app-id pro `window-rule` v niri |
@@ -39,6 +41,7 @@ Proměnné prostředí: `VIIM_DEBUG=1` – výpis polohy kurzoru při scrollu; `
 | šipky (se `Shift` větší krok) | posun obrazu |
 | tažení myší | posun obrazu; když je vidět celý obraz, přesouvá se okno |
 | `n` / `b` | další / předchozí obrázek |
+| `s` | slideshow zap / vyp (`n`/`b` odpočet vynuluje) |
 | `o` / `O` (Shift+o) | otevřít soubor / adresář (dialog; adresář → začne prvním obrázkem) |
 | `q` / `Esc` | zavřít |
 
@@ -50,6 +53,7 @@ Jen okno; chyby na stderr. Návratový kód: `0` OK, `1` nic se nepodařilo zobr
 - **Zoom a posun** se dělají uvnitř okna (`src/platno.rs`), okno se nemění. Vykreslení na GPU přes `append_scaled_texture` s filtrem `Trilinear` (mipmapy → hladké i silné zmenšení).
 - **Načítání** (`src/nacitani.rs`) běží ve vláknech: rastr crate `image` (plné rozlišení), SVG `resvg` (min. 2× rozlišení, po zoomu se přerenderuje ostřeji, max. 8192 px). Výsledek jde kanálem do hlavní smyčky GTK.
 - **Cache** (LRU, strop 768 MB) + předem načtení obrázku před a za aktuálním → `n`/`b` je okamžité, návrat zpět nic nedekóduje.
+- **Slideshow**: jeden `glib` časovač, který se naplánuje až po zobrazení obrázku → pomalé dekódování nic nepřeskočí, ruční `n`/`b` odpočet vynuluje, na konci seznamu jde dokola. Při jediném obrázku se časovač nespouští. Nečitelné soubory přeskočí stejně jako `n`.
 - **Střed okna**: niri drží při změně velikosti levý horní roh, proto se okno posune `niri msg action move-floating-window` o polovinu rozdílu.
 - **Poloha kurzoru** pro zoom: z události scrollu → dotaz na ukazatel → poslední `motion`/`enter`. Při `leave` se nemaže (démon `~/Projects/Kurzor` při dotyku touchpadu krátce převezme ukazatel).
 - Vynucení integrované GPU (`VK_DRIVER_FILES`, `__EGL_VENDOR_LIBRARY_FILENAMES`), aby se dGPU NVIDIA mohla uspat.

@@ -14,12 +14,14 @@ use gtk::{gdk, gio, glib, prelude::*};
 const NAPOVEDA: &str = "\
 Průhledný prohlížeč obrázků (PNG, SVG, JPEG, WebP, GIF, BMP, TIFF) v okně bez rámečku.
 
-Použití: viim [-t SEK] [-H MAX_VYSKA] [-W MAX_SIRKA] [--app-id ID] [cesta …]
+Použití: viim [-t SEK] [-s SEK] [-H MAX_VYSKA] [-W MAX_SIRKA] [--app-id ID] [cesta …]
 
   cesta                 soubor nebo adresář; jeden soubor → n/b listuje obrázky v jeho adresáři;
                         bez cesty se otevře dialog pro výběr souboru
   -t, --timeout SEK     zavřít po SEK sekundách (výchozí 0 = nezavírat); jakákoli akce
                         uživatele (klávesa, scroll, tažení) automatické zavření zruší
+  -s, --slideshow SEK   spustit slideshow s intervalem SEK (klávesa s ho zapíná
+                        s intervalem 3 s, nebo s tímto)
   -H, --max-height PX   max. výška okna v logických px (výchozí 90 % nejnižšího monitoru)
   -W, --max-width PX    max. šířka okna v logických px (výchozí 90 % nejužšího monitoru)
       --app-id ID       app-id okna pro pravidla niri (výchozí viim)
@@ -31,6 +33,7 @@ Ovládání:
   šipky                  posun obrazu (se Shiftem větší krok)
   tažení myší            posun obrazu; když je vidět celý obraz, přesouvá okno
   n / b                  další / předchozí obrázek
+  s                      slideshow zap / vyp (n/b odpočet vynuluje)
   o / O (Shift+o)        otevřít soubor / adresář
   q / Esc                zavřít
 
@@ -57,6 +60,8 @@ fn argumenty() -> Argumenty {
             max_w: None,
             max_h: None,
             ladeni: std::env::var_os("VIIM_DEBUG").is_some_and(|v| !v.is_empty()),
+            prezentace: 3.0,
+            prezentace_hned: false,
         },
         app_id: "viim".into(),
     };
@@ -90,6 +95,14 @@ fn argumenty() -> Argumenty {
                 std::process::exit(0);
             }
             "-t" | "--timeout" => a.nast.timeout = cislo(hodnota()),
+            "-s" | "--slideshow" => {
+                let v = cislo(hodnota());
+                if v <= 0.0 {
+                    chyba_arg(&format!("{prepinac}: interval musí být > 0"));
+                }
+                a.nast.prezentace = v;
+                a.nast.prezentace_hned = true;
+            }
             "-H" | "--max-height" => a.nast.max_h = Some(cislo(hodnota())).filter(|x| *x > 0.0),
             "-W" | "--max-width" => a.nast.max_w = Some(cislo(hodnota())).filter(|x| *x > 0.0),
             "--app-id" => a.app_id = hodnota(),

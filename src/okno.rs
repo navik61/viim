@@ -29,6 +29,10 @@ pub struct Nastaveni {
     pub max_w: Option<f64>,
     pub max_h: Option<f64>,
     pub ladeni: bool,
+    /// Interval slideshow v sekundách.
+    pub prezentace: f64,
+    /// Spustit slideshow hned po zobrazení prvního obrázku.
+    pub prezentace_hned: bool,
 }
 
 struct Polozka {
@@ -105,6 +109,8 @@ pub struct Prohlizec {
     tah: Cell<Option<(f64, f64)>>,
     casovac: RefCell<Option<glib::SourceId>>,
     svg_casovac: RefCell<Option<glib::SourceId>>,
+    prezentace: Cell<bool>,
+    prez_casovac: RefCell<Option<glib::SourceId>>,
     pub chyba: Rc<Cell<bool>>,
 }
 
@@ -150,6 +156,7 @@ impl Prohlizec {
         okno.set_child(Some(&platno));
 
         let (mon_w, mon_h) = limity_monitoru();
+        let prezentace_hned = nast.prezentace_hned;
         let (tx, rx) = async_channel::unbounded();
         let p = Rc::new(Self {
             app: app.clone(),
@@ -176,6 +183,8 @@ impl Prohlizec {
             tah: Cell::new(None),
             casovac: RefCell::default(),
             svg_casovac: RefCell::default(),
+            prezentace: Cell::new(prezentace_hned),
+            prez_casovac: RefCell::default(),
             chyba,
         });
 
@@ -394,6 +403,7 @@ impl Prohlizec {
             self.spust_casovac();
             self.spust_skript();
         }
+        self.naplanuj_dalsi();
 
         // načíst sousedy předem → přepnutí je okamžité
         if n > 1 {
@@ -438,6 +448,41 @@ impl Prohlizec {
             }
         });
         *self.svg_casovac.borrow_mut() = Some(id);
+    }
+
+    // ---------- slideshow ----------
+
+    /// Zapnout / vypnout slideshow.
+    fn prepni_prezentaci(self: &Rc<Self>) {
+        let zapnout = !self.prezentace.get();
+        self.prezentace.set(zapnout);
+        if zapnout {
+            self.naplanuj_dalsi();
+        } else if let Some(id) = self.prez_casovac.borrow_mut().take() {
+            id.remove();
+        }
+    }
+
+    /// Další obrázek za interval. Odpočet začíná až po zobrazení obrázku, takže pomalé
+    /// dekódování nic nepřeskočí a ruční n/b odpočet vynuluje.
+    fn naplanuj_dalsi(self: &Rc<Self>) {
+        if let Some(id) = self.prez_casovac.borrow_mut().take() {
+            id.remove();
+        }
+        if !self.prezentace.get() || self.pocet() < 2 || self.zobrazen.get().is_none() {
+            return;
+        }
+        let p = self.clone();
+        let id = glib::timeout_add_local_once(
+            Duration::from_secs_f64(self.nast.prezentace),
+            move || {
+                p.prez_casovac.borrow_mut().take();
+                if p.prezentace.get() {
+                    p.krok(1);
+                }
+            },
+        );
+        *self.prez_casovac.borrow_mut() = Some(id);
     }
 
     // ---------- automatické zavření ----------
@@ -608,6 +653,7 @@ impl Prohlizec {
             Key::q | Key::Q | Key::Escape => self.okno.close(),
             Key::n | Key::N => self.krok(1),
             Key::b | Key::B => self.krok(-1),
+            Key::s | Key::S => self.prepni_prezentaci(),
             Key::o => self.dialog(false),
             Key::O => self.dialog(true),
             Key::Left => p.posun(-sirka * krok, 0.0),
