@@ -44,7 +44,7 @@ struct Polozka {
     textura: gdk::Texture,
     w: f64,
     h: f64,
-    svg_meritko: Option<f64>,
+    meritko: Option<f64>,
     bajty: usize,
 }
 
@@ -167,6 +167,8 @@ pub struct Prohlizec {
     nast: Nastaveni,
     max_w: f64,
     max_h: f64,
+    /// Největší škála monitoru (fyzické px na logický) – na ni se zmenšují fotky.
+    skala: f64,
     soubory: RefCell<Vec<PathBuf>>,
     i: Cell<usize>,
     smer: Cell<isize>,
@@ -186,30 +188,31 @@ pub struct Prohlizec {
     mys: Cell<Option<(f64, f64)>>,
     tah: Cell<Option<(f64, f64)>>,
     casovac: RefCell<Option<glib::SourceId>>,
-    svg_casovac: RefCell<Option<glib::SourceId>>,
+    ostr_casovac: RefCell<Option<glib::SourceId>>,
     prezentace: Cell<bool>,
     prez_casovac: RefCell<Option<glib::SourceId>>,
     pub chyba: Rc<Cell<bool>>,
 }
 
-/// Nejmenší logická šířka a výška ze všech připojených monitorů.
-fn limity_monitoru() -> (f64, f64) {
+/// Nejmenší logická šířka a výška ze všech připojených monitorů a největší škála.
+fn limity_monitoru() -> (f64, f64, f64) {
     let Some(displej) = gdk::Display::default() else {
-        return (1920.0, 1080.0);
+        return (1920.0, 1080.0, 1.0);
     };
     let monitory = displej.monitors();
-    let (mut w, mut h) = (f64::MAX, f64::MAX);
+    let (mut w, mut h, mut skala) = (f64::MAX, f64::MAX, 1.0_f64);
     for i in 0..monitory.n_items() {
         if let Some(m) = monitory.item(i).and_downcast::<gdk::Monitor>() {
             let g = m.geometry();
             w = w.min(g.width() as f64);
             h = h.min(g.height() as f64);
+            skala = skala.max(m.scale());
         }
     }
     if w == f64::MAX {
-        (1920.0, 1080.0)
+        (1920.0, 1080.0, skala)
     } else {
-        (w, h)
+        (w, h, skala)
     }
 }
 
@@ -233,7 +236,7 @@ impl Prohlizec {
         let platno = Platno::default();
         okno.set_child(Some(&platno));
 
-        let (mon_w, mon_h) = limity_monitoru();
+        let (mon_w, mon_h, skala) = limity_monitoru();
         let prezentace_hned = nast.prezentace_hned;
         let (tx, rx) = async_channel::unbounded();
         let (prace, ulohy) = async_channel::unbounded();
@@ -248,6 +251,7 @@ impl Prohlizec {
             platno,
             max_w: nast.max_w.unwrap_or(mon_w * PODIL),
             max_h: nast.max_h.unwrap_or(mon_h * PODIL),
+            skala,
             nast,
             soubory: RefCell::default(),
             i: Cell::new(0),
@@ -267,7 +271,7 @@ impl Prohlizec {
             mys: Cell::new(None),
             tah: Cell::new(None),
             casovac: RefCell::default(),
-            svg_casovac: RefCell::default(),
+            ostr_casovac: RefCell::default(),
             prezentace: Cell::new(prezentace_hned),
             prez_casovac: RefCell::default(),
             chyba,
@@ -346,6 +350,7 @@ impl Prohlizec {
             max_w: self.max_w,
             max_h: self.max_h,
             ostrost: OSTROST,
+            skala: self.skala,
         }
     }
 
@@ -388,22 +393,33 @@ impl Prohlizec {
             }
             Ok(d) => {
                 if v.ostreni {
-                    // ostřejší SVG: jen pokud je opravdu lepší než to, co už je v cache
-                    let lepsi = d.svg_meritko.unwrap_or(0.0)
+                    // ostřejší textura: jen pokud je opravdu lepší než to, co už je v cache
+                    // (None = plné rozlišení = nejlepší)
+                    let lepsi = d.meritko.unwrap_or(f64::INFINITY)
                         > self
                             .cache
                             .borrow()
                             .polozky
                             .iter()
                             .find(|p| p.index == v.index)
-                            .and_then(|p| p.svg_meritko)
+                            .map(|p| p.meritko.unwrap_or(f64::INFINITY))
                             .unwrap_or(0.0);
                     if !lepsi {
                         return;
                     }
                 }
-                let (w, h, svg_meritko) = (d.w, d.h, d.svg_meritko);
+                let (w, h, meritko) = (d.w, d.h, d.meritko);
                 let bajty = d.data.len();
+                if self.nast.ladeni {
+                    eprintln!(
+                        "textura: {} {}x{} ({} MB{})",
+                        self.cesta(v.index).display(),
+                        d.tw,
+                        d.th,
+                        bajty / (1024 * 1024),
+                        if v.ostreni { ", ostřejší" } else { "" }
+                    );
+                }
                 let tex = textura(d);
                 self.cache.borrow_mut().vloz(
                     Polozka {
@@ -411,7 +427,7 @@ impl Prohlizec {
                         textura: tex.clone(),
                         w,
                         h,
-                        svg_meritko,
+                        meritko,
                         bajty,
                     },
                     aktualni,
@@ -514,9 +530,10 @@ impl Prohlizec {
         }
     }
 
-    /// Po zoomu SVG přerenderovat ve vyšším rozlišení (se zpožděním, ať se nerenderuje
-    /// při každém cvaku kolečka).
-    fn svg_doostrit(self: &Rc<Self>) {
+    /// Po zoomu dodekódovat ostřejší texturu (se zpožděním, ať se nedekóduje při každém
+    /// cvaku kolečka): SVG přerenderovat v potřebném měřítku, zmenšenou fotku načíst
+    /// rovnou v plném rozlišení (jedno dekódování místo jednoho na každý krok zoomu).
+    fn doostrit(self: &Rc<Self>) {
         let i = self.i.get();
         if self.zobrazen.get() != Some(i) {
             return;
@@ -527,26 +544,31 @@ impl Prohlizec {
             .polozky
             .iter()
             .find(|p| p.index == i)
-            .and_then(|p| p.svg_meritko)
+            .and_then(|p| p.meritko)
         else {
-            return;
+            return; // rastr v plném rozlišení
         };
         let skala = self.okno.surface().map(|s| s.scale()).unwrap_or(1.0);
         let potreba = self.platno.meritko() * skala;
         if potreba <= ma * 1.05 {
             return;
         }
-        if let Some(id) = self.svg_casovac.borrow_mut().take() {
+        let mira = if soubory::je_svg(&self.cesta(i)) {
+            Mira::Meritko(potreba)
+        } else {
+            Mira::Meritko(1.0)
+        };
+        if let Some(id) = self.ostr_casovac.borrow_mut().take() {
             id.remove();
         }
         let p = self.clone();
         let id = glib::timeout_add_local_once(Duration::from_millis(150), move || {
-            p.svg_casovac.borrow_mut().take();
+            p.ostr_casovac.borrow_mut().take();
             if p.i.get() == i {
-                p.pozadej(i, true, Mira::Meritko(potreba));
+                p.pozadej(i, true, mira);
             }
         });
-        *self.svg_casovac.borrow_mut() = Some(id);
+        *self.ostr_casovac.borrow_mut() = Some(id);
     }
 
     // ---------- slideshow ----------
@@ -669,7 +691,7 @@ impl Prohlizec {
             }; // touchpad
             let mys = p.kurzor(ctl);
             p.platno.zoomuj(KROK_ZOOM.powf(-dy), mys); // nahoru (dy < 0) = zvětšit
-            p.svg_doostrit();
+            p.doostrit();
             glib::Propagation::Stop
         });
         self.platno.add_controller(kolecko);
@@ -761,7 +783,7 @@ impl Prohlizec {
             Key::Down => p.posun(0.0, vyska * krok),
             Key::equal | Key::plus | Key::KP_Add => {
                 p.zoomuj(KROK_ZOOM, None);
-                self.svg_doostrit();
+                self.doostrit();
             }
             Key::minus | Key::KP_Subtract => p.zoomuj(1.0 / KROK_ZOOM, None),
             Key::_0 | Key::KP_0 => p.reset(),

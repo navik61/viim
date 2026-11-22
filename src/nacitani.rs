@@ -4,16 +4,18 @@ use std::sync::{Arc, OnceLock};
 
 use crate::soubory::je_svg;
 
-/// Jak velké má být SVG vykreslení (rastrové obrázky se dekódují vždy v plném rozlišení).
+/// Jak velkou texturu vyrobit.
 #[derive(Clone, Copy, Debug)]
 pub enum Mira {
-    /// Vejít se do okna max_w × max_h (logické px), vykreslit `ostrost`× větší.
+    /// Vejít se do okna max_w × max_h (logické px). SVG se vykreslí `ostrost`× větší,
+    /// rastr se zmenší na `skala`× (škála monitoru = fyzické px), nikdy nezvětší.
     Okno {
         max_w: f64,
         max_h: f64,
         ostrost: f64,
+        skala: f64,
     },
-    /// Pevné měřítko: px textury na px obrázku.
+    /// Pevné měřítko: px textury na px obrázku (rastr max. 1 = plné rozlišení).
     Meritko(f64),
 }
 
@@ -34,22 +36,25 @@ pub struct Dekodovano {
     pub stride: usize,
     pub format: Format,
     pub data: Vec<u8>,
-    /// U SVG rozlišení textury (px textury na px obrázku), jinak None.
-    pub svg_meritko: Option<f64>,
+    /// Rozlišení textury (px textury na px obrázku); None = rastr v plném rozlišení
+    /// (ostřejší už být nemůže).
+    pub meritko: Option<f64>,
 }
 
 /// Strop velikosti SVG textury (paměť GPU).
 const SVG_MAX_STRANA: f64 = 8192.0;
+/// Rastr se zmenšuje, jen když ušetří aspoň ~20 % paměti (jinak plné rozlišení).
+const RASTR_ZMENSIT_POD: f64 = 0.9;
 
 pub fn dekoduj(cesta: &Path, mira: Mira) -> Result<Dekodovano, String> {
     if je_svg(cesta) {
         svg(cesta, mira)
     } else {
-        rastr(cesta)
+        rastr(cesta, mira)
     }
 }
 
-fn rastr(cesta: &Path) -> Result<Dekodovano, String> {
+fn rastr(cesta: &Path, mira: Mira) -> Result<Dekodovano, String> {
     let obr = image::ImageReader::open(cesta)
         .map_err(|e| e.to_string())?
         .with_guessed_format()
@@ -57,20 +62,49 @@ fn rastr(cesta: &Path) -> Result<Dekodovano, String> {
         .decode()
         .map_err(|e| e.to_string())?;
     let (w, h) = (obr.width(), obr.height());
-    let (format, data, bpp) = if obr.color().has_alpha() {
-        (Format::Rgba, obr.into_rgba8().into_raw(), 4)
+    let (wf, hf) = (w as f64, h as f64);
+    let m = match mira {
+        Mira::Okno {
+            max_w, max_h, skala, ..
+        } => (max_w / wf).min(max_h / hf).min(1.0) * skala,
+        Mira::Meritko(m) => m,
+    };
+    // zmenšení plošným průměrem (imageops::thumbnail) – rychlé a bez aliasingu
+    let (tw, th) = if m < RASTR_ZMENSIT_POD {
+        (
+            ((wf * m).round() as u32).max(1),
+            ((hf * m).round() as u32).max(1),
+        )
     } else {
-        (Format::Rgb, obr.into_rgb8().into_raw(), 3)
+        (w, h)
+    };
+    let zmensit = (tw, th) != (w, h);
+    let (format, data, bpp) = if obr.color().has_alpha() {
+        let b = obr.into_rgba8();
+        let b = if zmensit {
+            image::imageops::thumbnail(&b, tw, th)
+        } else {
+            b
+        };
+        (Format::Rgba, b.into_raw(), 4)
+    } else {
+        let b = obr.into_rgb8();
+        let b = if zmensit {
+            image::imageops::thumbnail(&b, tw, th)
+        } else {
+            b
+        };
+        (Format::Rgb, b.into_raw(), 3)
     };
     Ok(Dekodovano {
-        w: w as f64,
-        h: h as f64,
-        tw: w,
-        th: h,
-        stride: w as usize * bpp,
+        w: wf,
+        h: hf,
+        tw,
+        th,
+        stride: tw as usize * bpp,
         format,
         data,
-        svg_meritko: None,
+        meritko: zmensit.then(|| tw as f64 / wf),
     })
 }
 
@@ -102,6 +136,7 @@ fn svg(cesta: &Path, mira: Mira) -> Result<Dekodovano, String> {
             max_w,
             max_h,
             ostrost,
+            ..
         } => (max_w / w).min(max_h / h).min(1.0) * ostrost,
         Mira::Meritko(m) => m,
     }
@@ -120,6 +155,6 @@ fn svg(cesta: &Path, mira: Mira) -> Result<Dekodovano, String> {
         stride: tw as usize * 4,
         format: Format::RgbaPremult,
         data: pixmap.take(),
-        svg_meritko: Some(meritko),
+        meritko: Some(meritko),
     })
 }

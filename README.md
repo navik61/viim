@@ -30,7 +30,7 @@ viim -s 5 ~/Obrazky      # slideshow, obrázek každých 5 s
 | `--app-id ID` | `viim` | app-id pro `window-rule` v niri |
 | `-h`, `--help` | | nápověda |
 
-Proměnné prostředí: `VIIM_DEBUG=1` – výpis polohy kurzoru při scrollu; `VIIM_SKRIPT="n n b q"` – testovací háček, po zobrazení „stiskne“ zadané klávesy (á 700 ms, jména kláves GDK, např. `plus`, `Left`).
+Proměnné prostředí: `VIIM_DEBUG=1` – výpis polohy kurzoru při scrollu a velikosti každé nové textury (`textura: soubor ŠxV (MB)`); `VIIM_SKRIPT="n n b q"` – testovací háček, po zobrazení „stiskne“ zadané klávesy (á 700 ms, jména kláves GDK, např. `plus`, `Left`).
 
 ## Ovládání
 | Klávesa / myš | Akce |
@@ -51,14 +51,14 @@ Jen okno; chyby na stderr. Návratový kód: `0` OK, `1` nic se nepodařilo zobr
 ## Jak to funguje
 - **Velikost okna** se spočítá z rozměrů obrázku (jen zmenšení do limitu, nikdy zvětšení) a okno se zobrazí až po načtení prvního obrázku. `resizable=false` → niri ho otevře jako plovoucí.
 - **Zoom a posun** se dělají uvnitř okna (`src/platno.rs`), okno se nemění. Vykreslení na GPU přes `append_scaled_texture` s filtrem `Trilinear` (mipmapy → hladké i silné zmenšení).
-- **Načítání** (`src/nacitani.rs`) běží v pevném poolu 2 vláken (`PRACANTU`) s frontou úloh; úloha, která mezitím přestala být potřeba (jiný seznam, obrázek dál než ± 1 od aktuálního), se přeskočí bez dekódování → rychlé listování nespouští desítky dekódování naráz. Panika dekodéru se zachytí a soubor se bere jako nečitelný (vlákno přežije). Dekódování: rastr crate `image` (plné rozlišení), SVG `resvg` (min. 2× rozlišení, po zoomu se přerenderuje ostřeji, max. 8192 px). Výsledek jde kanálem do hlavní smyčky GTK.
+- **Načítání** (`src/nacitani.rs`) běží v pevném poolu 2 vláken (`PRACANTU`) s frontou úloh; úloha, která mezitím přestala být potřeba (jiný seznam, obrázek dál než ± 1 od aktuálního), se přeskočí bez dekódování → rychlé listování nespouští desítky dekódování naráz. Panika dekodéru se zachytí a soubor se bere jako nečitelný (vlákno přežije). Dekódování: rastr crate `image`, zmenšený plošným průměrem (`imageops::thumbnail`) na velikost okna × největší škála monitoru (fyzické px; menší obrázky a úspora < ~20 % → plné rozlišení); po zoomu nad toto rozlišení se ~150 ms po posledním kroku dočte plné rozlišení (jedno dekódování) a vymění se bez změny pohledu. SVG `resvg` (min. 2× rozlišení, po zoomu se přerenderuje ostřeji, max. 8192 px). Výsledek jde kanálem do hlavní smyčky GTK.
 - **Cache** (strop 768 MB, průběžně počítaná velikost) + předem načtení obrázku před a za aktuálním → `n`/`b` je okamžité. Při přeplnění se vyhodí obrázek **nejvzdálenější** od aktuálního (při shodě déle nepoužitý), takže předem načtení sousedé zůstanou.
 - **Slideshow**: jeden `glib` časovač, který se naplánuje až po zobrazení obrázku → pomalé dekódování nic nepřeskočí, ruční `n`/`b` odpočet vynuluje, na konci seznamu jde dokola. Při jediném obrázku se časovač nespouští. Nečitelné soubory přeskočí stejně jako `n`.
 - **Střed okna**: niri drží při změně velikosti levý horní roh, proto se okno posune `niri msg action move-floating-window` o polovinu rozdílu.
 - **Poloha kurzoru** pro zoom: z události scrollu → dotaz na ukazatel → poslední `motion`/`enter`. Při `leave` se nemaže (démon `~/Projects/Kurzor` při dotyku touchpadu krátce převezme ukazatel).
 - Vynucení integrované GPU (`VK_DRIVER_FILES`, `__EGL_VENDOR_LIBRARY_FILENAMES`), aby se dGPU NVIDIA mohla uspat.
 
-Konstanty (`src/okno.rs`): `OSTROST`, `KROK_ZOOM` (1,2), `KROK_POSUN` (10 %), `PODIL` (0,9), `CACHE_BAJTY` (768 MB); `src/platno.rs`: `ZOOM_MIN`/`ZOOM_MAX`.
+Konstanty (`src/okno.rs`): `OSTROST`, `KROK_ZOOM` (1,2), `KROK_POSUN` (10 %), `PODIL` (0,9), `CACHE_BAJTY` (768 MB), `PRACANTU` (2); `src/nacitani.rs`: `RASTR_ZMENSIT_POD` (0,9), `SVG_MAX_STRANA` (8192); `src/platno.rs`: `ZOOM_MIN`/`ZOOM_MAX`.
 
 ## Sestavení a instalace
 ```sh
@@ -86,6 +86,7 @@ Systém: `gtk4` (≥ 4.14), Rust ≥ 1.85 (edition 2024). Crates: `gtk4`, `image
 
 ## Řešení problémů
 - **Zoom jde od středu:** `VIIM_DEBUG=1 viim obr.png` – vypisuje `událost=` / `dotaz=` / `motion=`; všechny `None` = poloha kurzoru chybí.
-- **Velká spotřeba paměti:** cache drží až 768 MB dekódovaných obrázků (velké PNG ~70 MB/kus) – sniž `CACHE_BAJTY`.
+- **Velká spotřeba paměti:** cache drží až 768 MB dekódovaných obrázků; fotky jsou zmenšené na velikost okna (~10 MB/kus), v plném rozlišení jen ty, do kterých se zoomovalo – sniž `CACHE_BAJTY`.
+- **Fotka je po zvětšení chvíli neostrá:** plné rozlišení se dočítá ~150 ms po posledním kroku zoomu (`VIIM_DEBUG=1` ukáže `ostřejší`).
 - **Okno při přepnutí „skáče“:** chybí `NIRI_SOCKET` nebo `niri` v PATH → bez dorovnání zůstane na místě levý horní roh.
 - **SVG s textem vypadá jinak než v rsvg:** `resvg` používá systémová písma přes `fontdb`; chybějící font se nahradí.
