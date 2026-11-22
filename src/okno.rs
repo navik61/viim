@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use gtk::{gdk, gio, glib, graphene, prelude::*};
@@ -22,6 +24,8 @@ const KROK_POSUN: f64 = 0.1;
 const PODIL: f64 = 0.9;
 /// Paměťový strop cache dekódovaných obrázků.
 const CACHE_BAJTY: usize = 768 * 1024 * 1024;
+/// Počet dekódovacích vláken: aktuální obrázek + jeden soused zároveň.
+const PRACANTU: usize = 2;
 
 #[derive(Clone)]
 pub struct Nastaveni {
@@ -44,10 +48,18 @@ struct Polozka {
     bajty: usize,
 }
 
-/// Jednoduchá LRU cache textur s paměťovým stropem.
+/// Vzdálenost dvou indexů v kruhovém seznamu délky `n`.
+fn vzdalenost(a: usize, b: usize, n: usize) -> usize {
+    let d = a.abs_diff(b);
+    d.min(n.saturating_sub(d))
+}
+
+/// Cache textur s paměťovým stropem; při přeplnění vyhazuje obrázek nejvzdálenější
+/// od aktuálního (při shodě ten déle nepoužitý) → předem načtení sousedé zůstanou.
 #[derive(Default)]
 struct Cache {
-    polozky: Vec<Polozka>, // od nejstarší po nejnovější
+    polozky: Vec<Polozka>, // od nejdéle nepoužité po naposledy použitou
+    bajty: usize,
 }
 
 impl Cache {
@@ -62,16 +74,80 @@ impl Cache {
         self.polozky.iter().any(|p| p.index == index)
     }
 
-    fn vloz(&mut self, polozka: Polozka, aktualni: usize) {
-        self.polozky.retain(|p| p.index != polozka.index);
+    fn vyprazdni(&mut self) {
+        self.polozky.clear();
+        self.bajty = 0;
+    }
+
+    fn vloz(&mut self, polozka: Polozka, aktualni: usize, n: usize) {
+        if let Some(pos) = self.polozky.iter().position(|p| p.index == polozka.index) {
+            self.bajty -= self.polozky.remove(pos).bajty;
+        }
+        self.bajty += polozka.bajty;
         self.polozky.push(polozka);
-        while self.polozky.iter().map(|p| p.bajty).sum::<usize>() > CACHE_BAJTY {
-            match self.polozky.iter().position(|p| p.index != aktualni) {
-                Some(pos) if self.polozky.len() > 1 => {
-                    self.polozky.remove(pos);
+        while self.bajty > CACHE_BAJTY && self.polozky.len() > 1 {
+            let mut obet: Option<(usize, usize)> = None; // (pozice, vzdálenost)
+            for (pos, p) in self.polozky.iter().enumerate() {
+                let d = vzdalenost(p.index, aktualni, n);
+                if p.index != aktualni && obet.is_none_or(|(_, nej)| d > nej) {
+                    obet = Some((pos, d));
                 }
-                _ => break,
             }
+            let Some((pos, _)) = obet else { break };
+            self.bajty -= self.polozky.remove(pos).bajty;
+        }
+    }
+}
+
+/// Co potřebuje hlavní vlákno teď – čtou to pracanti, aby zbytečně nedekódovali.
+#[derive(Default)]
+struct Sdilene {
+    generace: AtomicU64,
+    aktualni: AtomicUsize,
+    pocet: AtomicUsize,
+}
+
+struct Uloha {
+    generace: u64,
+    index: usize,
+    ostreni: bool,
+    cesta: PathBuf,
+    mira: Mira,
+}
+
+impl Sdilene {
+    /// Je úloha ještě k něčemu? (stejný seznam; ostření jen aktuálního, jinak aktuální ± 1)
+    fn chce(&self, u: &Uloha) -> bool {
+        let aktualni = self.aktualni.load(Ordering::Relaxed);
+        u.generace == self.generace.load(Ordering::Relaxed)
+            && if u.ostreni {
+                u.index == aktualni
+            } else {
+                vzdalenost(u.index, aktualni, self.pocet.load(Ordering::Relaxed)) <= 1
+            }
+    }
+}
+
+/// Dekódovací vlákno: bere úlohy z fronty; zastaralé přeskočí, paniku dekodéru
+/// převede na chybu (vlákno přežije a soubor se označí jako nečitelný).
+fn pracant(
+    rx: async_channel::Receiver<Uloha>,
+    tx: async_channel::Sender<Vysledek>,
+    sdilene: Arc<Sdilene>,
+) {
+    while let Ok(u) = rx.recv_blocking() {
+        let vysledek = sdilene.chce(&u).then(|| {
+            std::panic::catch_unwind(|| nacitani::dekoduj(&u.cesta, u.mira))
+                .unwrap_or_else(|_| Err("dekodér selhal (panika)".into()))
+        });
+        let v = Vysledek {
+            generace: u.generace,
+            index: u.index,
+            ostreni: u.ostreni,
+            vysledek,
+        };
+        if tx.send_blocking(v).is_err() {
+            break;
         }
     }
 }
@@ -80,7 +156,8 @@ struct Vysledek {
     generace: u64,
     index: usize,
     ostreni: bool,
-    vysledek: Result<Dekodovano, String>,
+    /// None = úloha přeskočena (už nebyla potřeba).
+    vysledek: Option<Result<Dekodovano, String>>,
 }
 
 pub struct Prohlizec {
@@ -97,7 +174,8 @@ pub struct Prohlizec {
     cache: RefCell<Cache>,
     bezi: RefCell<HashSet<(usize, bool)>>,
     chybne: RefCell<HashSet<usize>>,
-    tx: async_channel::Sender<Vysledek>,
+    prace: async_channel::Sender<Uloha>,
+    sdilene: Arc<Sdilene>,
     zobrazen: Cell<Option<usize>>,
     prezentovano: Cell<bool>,
     /// Drží aplikaci naživu, než se otevře okno (načítání / dialog běží asynchronně).
@@ -158,6 +236,12 @@ impl Prohlizec {
         let (mon_w, mon_h) = limity_monitoru();
         let prezentace_hned = nast.prezentace_hned;
         let (tx, rx) = async_channel::unbounded();
+        let (prace, ulohy) = async_channel::unbounded();
+        let sdilene = Arc::new(Sdilene::default());
+        for _ in 0..PRACANTU {
+            let (ulohy, tx, sdilene) = (ulohy.clone(), tx.clone(), sdilene.clone());
+            std::thread::spawn(move || pracant(ulohy, tx, sdilene));
+        }
         let p = Rc::new(Self {
             app: app.clone(),
             okno,
@@ -172,7 +256,8 @@ impl Prohlizec {
             cache: RefCell::default(),
             bezi: RefCell::default(),
             chybne: RefCell::default(),
-            tx,
+            prace,
+            sdilene,
             zobrazen: Cell::new(None),
             prezentovano: Cell::new(false),
             drzak: RefCell::new(Some(app.hold())),
@@ -212,14 +297,23 @@ impl Prohlizec {
             return;
         }
         self.generace.set(self.generace.get() + 1);
+        self.sdilene
+            .generace
+            .store(self.generace.get(), Ordering::Relaxed);
+        self.sdilene.pocet.store(seznam.len(), Ordering::Relaxed);
         *self.soubory.borrow_mut() = seznam;
-        self.cache.borrow_mut().polozky.clear();
+        self.cache.borrow_mut().vyprazdni();
         self.bezi.borrow_mut().clear();
         self.chybne.borrow_mut().clear();
         self.zobrazen.set(None);
-        self.i.set(index);
+        self.nastav_i(index);
         self.smer.set(1);
         self.nacti_aktualni();
+    }
+
+    fn nastav_i(&self, i: usize) {
+        self.i.set(i);
+        self.sdilene.aktualni.store(i, Ordering::Relaxed);
     }
 
     fn pocet(&self) -> usize {
@@ -255,20 +349,17 @@ impl Prohlizec {
         }
     }
 
-    /// Spustí dekódování ve vlákně (pokud už neběží).
+    /// Zařadí dekódování do fronty pracantů (pokud už tam není).
     fn pozadej(&self, i: usize, ostreni: bool, mira: Mira) {
         if !self.bezi.borrow_mut().insert((i, ostreni)) {
             return;
         }
-        let (cesta, tx, generace) = (self.cesta(i), self.tx.clone(), self.generace.get());
-        std::thread::spawn(move || {
-            let vysledek = nacitani::dekoduj(&cesta, mira);
-            let _ = tx.send_blocking(Vysledek {
-                generace,
-                index: i,
-                ostreni,
-                vysledek,
-            });
+        let _ = self.prace.send_blocking(Uloha {
+            generace: self.generace.get(),
+            index: i,
+            ostreni,
+            cesta: self.cesta(i),
+            mira,
         });
     }
 
@@ -278,7 +369,14 @@ impl Prohlizec {
         }
         self.bezi.borrow_mut().remove(&(v.index, v.ostreni));
         let aktualni = self.i.get();
-        match v.vysledek {
+        let Some(vysledek) = v.vysledek else {
+            // přeskočeno; pokud je mezitím zase potřeba (návrat zpět), zadat znovu
+            if v.index == aktualni && !v.ostreni && self.zobrazen.get() != Some(aktualni) {
+                self.nacti_aktualni();
+            }
+            return;
+        };
+        match vysledek {
             Err(e) => {
                 eprintln!("viim: {}: {e}", self.cesta(v.index).display());
                 if !v.ostreni {
@@ -317,6 +415,7 @@ impl Prohlizec {
                         bajty,
                     },
                     aktualni,
+                    self.pocet(),
                 );
                 if v.index == aktualni {
                     if v.ostreni {
@@ -352,7 +451,7 @@ impl Prohlizec {
                 break;
             }
         }
-        self.i.set(i);
+        self.nastav_i(i);
         self.nacti_aktualni();
     }
 
