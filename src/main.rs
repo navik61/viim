@@ -113,21 +113,33 @@ fn argumenty() -> Argumenty {
     a
 }
 
+/// Je v systému GPU od AMD (PCI vendor 0x1002)?
+fn ma_amd_gpu() -> bool {
+    std::fs::read_dir("/sys/class/drm").into_iter().flatten().flatten().any(|e| {
+        std::fs::read_to_string(e.path().join("device/vendor"))
+            .is_ok_and(|v| v.trim() == "0x1002")
+    })
+}
+
 fn main() -> ExitCode {
     let args = argumenty();
 
-    // Vykreslovat jen na integrované AMD GPU: jinak Vulkan/EGL loader otevře i ovladač NVIDIA
-    // a dGPU se nikdy neuspí. Musí být před inicializací GTK (a před vznikem vláken).
-    for (k, v) in [
-        ("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/radeon_icd.json"),
-        (
-            "__EGL_VENDOR_LIBRARY_FILENAMES",
-            "/usr/share/glvnd/egl_vendor.d/50_mesa.json",
-        ),
-    ] {
-        if std::env::var_os(k).is_none() && std::path::Path::new(v).exists() {
-            // SAFETY: zatím běží jen jedno vlákno
-            unsafe { std::env::set_var(k, v) };
+    // Na hybridní grafice s AMD GPU vykreslovat na AMD: jinak Vulkan/EGL loader otevře
+    // i ovladač NVIDIA a dGPU se nikdy neuspí. Jen pokud AMD GPU v systému je (jinak by se
+    // na počítačích bez AMD rozbilo vykreslování); VIIM_AMD=0 vypne.
+    // Musí být před inicializací GTK (a před vznikem vláken).
+    if std::env::var("VIIM_AMD").map_or(true, |v| v != "0") && ma_amd_gpu() {
+        for (k, v) in [
+            ("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/radeon_icd.json"),
+            (
+                "__EGL_VENDOR_LIBRARY_FILENAMES",
+                "/usr/share/glvnd/egl_vendor.d/50_mesa.json",
+            ),
+        ] {
+            if std::env::var_os(k).is_none() && std::path::Path::new(v).exists() {
+                // SAFETY: zatím běží jen jedno vlákno
+                unsafe { std::env::set_var(k, v) };
+            }
         }
     }
 

@@ -1,7 +1,10 @@
 [Desktop Entry]
 Type=Application
 Name=Viim
-Comment=Průhledný prohlížeč obrázků
+Comment=Minimalist transparent image viewer
+Comment[cs]=Minimalistický průhledný prohlížeč obrázků
+GenericName=Image Viewer
+GenericName[cs]=Prohlížeč obrázků
 Exec=viim %F
 Terminal=false
 MimeType=image/png;image/jpeg;image/webp;image/gif;image/bmp;image/tiff;image/svg+xml;

@@ -2,6 +2,12 @@
 name = "viim"
 version = "0.1.0"
 edition = "2024"
+description = "Minimalist transparent image viewer for niri (Wayland), GTK4"
+license = "MIT"
+repository = "https://github.com/navik61/viim"
+readme = "README.md"
+keywords = ["image-viewer", "gtk4", "wayland", "niri"]
+categories = ["multimedia::images"]
 
 [dependencies]
 async-channel = "2.5.0"
