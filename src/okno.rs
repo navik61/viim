@@ -328,6 +328,24 @@ impl Prohlizec {
         self.soubory.borrow()[i].clone()
     }
 
+    /// Klávesa `c`: barevné schéma Noctalie z aktuálního obrázku (`noctalia-schemes`).
+    fn nastav_schema(&self) {
+        let cesta = self.cesta(self.i.get());
+        match Command::new("noctalia-schemes")
+            .arg(&cesta)
+            .stdin(Stdio::null())
+            .spawn()
+        {
+            // na pozadí; vlákno jen sklidí proces (žádný zombie)
+            Ok(mut dite) => {
+                std::thread::spawn(move || {
+                    let _ = dite.wait();
+                });
+            }
+            Err(e) => eprintln!("viim: noctalia-schemes: {e}"),
+        }
+    }
+
     fn konec_s_chybou(&self) {
         self.chyba.set(true);
         self.drzak.borrow_mut().take();
@@ -775,6 +793,7 @@ impl Prohlizec {
             Key::n | Key::N => self.krok(1),
             Key::b | Key::B => self.krok(-1),
             Key::s | Key::S => self.prepni_prezentaci(),
+            Key::c | Key::C => self.nastav_schema(),
             Key::o => self.dialog(false),
             Key::O => self.dialog(true),
             Key::Left => p.posun(-sirka * krok, 0.0),

@@ -81,6 +81,7 @@ Environment variables:
 | mouse drag | pan the image; when the whole image is visible, moves the window |
 | `n` / `b` | next / previous image |
 | `s` | slideshow on / off (`n`/`b` reset the countdown) |
+| `c` | set the Noctalia colour scheme from the current image (`noctalia-schemes`) |
 | `o` / `O` (Shift+o) | open a file / directory (dialog; directory → starts with the first image) |
 | `q` / `Esc` | close |
 

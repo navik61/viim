@@ -79,6 +79,7 @@ Proměnné prostředí:
 | tažení myší | posun obrazu; když je vidět celý obraz, přesouvá se okno |
 | `n` / `b` | další / předchozí obrázek |
 | `s` | slideshow zap / vyp (`n`/`b` odpočet vynuluje) |
+| `c` | nastavit barevné schéma Noctalie z aktuálního obrázku (`noctalia-schemes`) |
 | `o` / `O` (Shift+o) | otevřít soubor / adresář (dialog; adresář → začne prvním obrázkem) |
 | `q` / `Esc` | zavřít |
 
